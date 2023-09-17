@@ -1,17 +1,13 @@
+# Originally from hugging face diffusers (https://github.com/huggingface/diffusers)
+# and Simo Ruy (https://github.com/cloneofsimo/minSDXL).
 # Obviously modified from the original source code
-# https://github.com/huggingface/diffusers
-# So has APACHE 2.0 license
 
-# Author : Simo Ryu
+import math
+from collections import namedtuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-
-from collections import namedtuple
-
-# SDXL
 
 
 class Timesteps(nn.Module):
@@ -38,7 +34,7 @@ class Timesteps(nn.Module):
 
 class TimestepEmbedding(nn.Module):
     def __init__(self, in_features, out_features):
-        super(TimestepEmbedding, self).__init__()
+        super().__init__()
         self.linear_1 = nn.Linear(in_features, out_features, bias=True)
         self.act = nn.SiLU()
         self.linear_2 = nn.Linear(out_features, out_features, bias=True)
@@ -53,7 +49,7 @@ class TimestepEmbedding(nn.Module):
 
 class ResnetBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, conv_shortcut=True):
-        super(ResnetBlock2D, self).__init__()
+        super().__init__()
         self.norm1 = nn.GroupNorm(32, in_channels, eps=1e-05, affine=True)
         self.conv1 = nn.Conv2d(
             in_channels, out_channels, kernel_size=3, stride=1, padding=1
@@ -99,7 +95,7 @@ class Attention(nn.Module):
     def __init__(
         self, inner_dim, cross_attention_dim=None, num_heads=None, dropout=0.0
     ):
-        super(Attention, self).__init__()
+        super().__init__()
         if num_heads is None:
             self.head_dim = 64
             self.num_heads = inner_dim // self.head_dim
@@ -110,36 +106,43 @@ class Attention(nn.Module):
         self.scale = self.head_dim**-0.5
         if cross_attention_dim is None:
             cross_attention_dim = inner_dim
+
         self.to_q = nn.Linear(inner_dim, inner_dim, bias=False)
         self.to_k = nn.Linear(cross_attention_dim, inner_dim, bias=False)
         self.to_v = nn.Linear(cross_attention_dim, inner_dim, bias=False)
 
         self.to_out = nn.ModuleList(
-            [nn.Linear(inner_dim, inner_dim), nn.Dropout(dropout, inplace=False)]
+            [
+                nn.Linear(inner_dim, inner_dim),
+                nn.Dropout(dropout, inplace=False),
+            ]
         )
 
     def forward(self, hidden_states, encoder_hidden_states=None):
-        q = self.to_q(hidden_states)
-        k = (
-            self.to_k(encoder_hidden_states)
-            if encoder_hidden_states is not None
-            else self.to_k(hidden_states)
-        )
-        v = (
-            self.to_v(encoder_hidden_states)
-            if encoder_hidden_states is not None
-            else self.to_v(hidden_states)
-        )
-        b, t, c = q.size()
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
 
-        q = q.view(q.size(0), q.size(1), self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(k.size(0), k.size(1), self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(v.size(0), v.size(1), self.num_heads, self.head_dim).transpose(1, 2)
+        query = self.to_q(hidden_states)
+        key = self.to_k(encoder_hidden_states)
+        value = self.to_v(encoder_hidden_states)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attn_weights = torch.softmax(scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, v)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(b, t, c)
+        b_size, _, _ = encoder_hidden_states.shape
+
+        query = query.view(b_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        key = key.view(b_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        value = value.view(b_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+
+        attn_output = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+        attn_output = attn_output.transpose(1, 2).reshape(
+            b_size, -1, self.head_dim * self.num_heads
+        )
+        attn_output = attn_output.to(query.dtype)
 
         for layer in self.to_out:
             attn_output = layer(attn_output)
@@ -149,7 +152,7 @@ class Attention(nn.Module):
 
 class GEGLU(nn.Module):
     def __init__(self, in_features, out_features):
-        super(GEGLU, self).__init__()
+        super().__init__()
         self.proj = nn.Linear(in_features, out_features * 2, bias=True)
 
     def forward(self, x):
@@ -160,7 +163,7 @@ class GEGLU(nn.Module):
 
 class FeedForward(nn.Module):
     def __init__(self, in_features, out_features):
-        super(FeedForward, self).__init__()
+        super().__init__()
 
         self.net = nn.ModuleList(
             [
@@ -178,7 +181,7 @@ class FeedForward(nn.Module):
 
 class BasicTransformerBlock(nn.Module):
     def __init__(self, hidden_size):
-        super(BasicTransformerBlock, self).__init__()
+        super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, eps=1e-05, elementwise_affine=True)
         self.attn1 = Attention(hidden_size)
         self.norm2 = nn.LayerNorm(hidden_size, eps=1e-05, elementwise_affine=True)
@@ -212,7 +215,7 @@ class BasicTransformerBlock(nn.Module):
 
 class Transformer2DModel(nn.Module):
     def __init__(self, in_channels, out_channels, n_layers):
-        super(Transformer2DModel, self).__init__()
+        super().__init__()
         self.norm = nn.GroupNorm(32, in_channels, eps=1e-06, affine=True)
         self.proj_in = nn.Linear(in_channels, out_channels, bias=True)
         self.transformer_blocks = nn.ModuleList(
@@ -245,7 +248,7 @@ class Transformer2DModel(nn.Module):
 
 class Downsample2D(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(Downsample2D, self).__init__()
+        super().__init__()
         self.conv = nn.Conv2d(
             in_channels, out_channels, kernel_size=3, stride=2, padding=1
         )
@@ -256,7 +259,7 @@ class Downsample2D(nn.Module):
 
 class Upsample2D(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(Upsample2D, self).__init__()
+        super().__init__()
         self.conv = nn.Conv2d(
             in_channels, out_channels, kernel_size=3, stride=1, padding=1
         )
@@ -268,7 +271,7 @@ class Upsample2D(nn.Module):
 
 class DownBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(DownBlock2D, self).__init__()
+        super().__init__()
         self.resnets = nn.ModuleList(
             [
                 ResnetBlock2D(in_channels, out_channels, conv_shortcut=False),
@@ -291,7 +294,7 @@ class DownBlock2D(nn.Module):
 
 class CrossAttnDownBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, n_layers, has_downsamplers=True):
-        super(CrossAttnDownBlock2D, self).__init__()
+        super().__init__()
         self.attentions = nn.ModuleList(
             [
                 Transformer2DModel(out_channels, out_channels, n_layers),
@@ -329,7 +332,7 @@ class CrossAttnDownBlock2D(nn.Module):
 
 class CrossAttnUpBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, prev_output_channel, n_layers):
-        super(CrossAttnUpBlock2D, self).__init__()
+        super().__init__()
         self.attentions = nn.ModuleList(
             [
                 Transformer2DModel(out_channels, out_channels, n_layers),
@@ -369,7 +372,7 @@ class CrossAttnUpBlock2D(nn.Module):
 
 class UpBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, prev_output_channel):
-        super(UpBlock2D, self).__init__()
+        super().__init__()
         self.resnets = nn.ModuleList(
             [
                 ResnetBlock2D(out_channels + prev_output_channel, out_channels),
@@ -390,7 +393,7 @@ class UpBlock2D(nn.Module):
 
 class UNetMidBlock2DCrossAttn(nn.Module):
     def __init__(self, in_features):
-        super(UNetMidBlock2DCrossAttn, self).__init__()
+        super().__init__()
         self.attentions = nn.ModuleList(
             [Transformer2DModel(in_features, in_features, n_layers=10)]
         )
@@ -415,7 +418,7 @@ class UNetMidBlock2DCrossAttn(nn.Module):
 
 class UNet2DConditionModel(nn.Module):
     def __init__(self):
-        super(UNet2DConditionModel, self).__init__()
+        super().__init__()
 
         # This is needed to imitate huggingface config behavior
         # has nothing to do with the model itself
