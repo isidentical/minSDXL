@@ -8,6 +8,7 @@ from collections import namedtuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flash_attn import flash_attn_func
 
 
 class Timesteps(nn.Module):
@@ -120,28 +121,30 @@ class Attention(nn.Module):
 
     def forward(self, hidden_states, encoder_hidden_states=None):
         if encoder_hidden_states is None:
-            encoder_hidden_states = hidden_states
+            kv_params = hidden_states
+        else:
+            assert encoder_hidden_states is not None
+            kv_params = encoder_hidden_states
 
         query = self.to_q(hidden_states)
-        key = self.to_k(encoder_hidden_states)
-        value = self.to_v(encoder_hidden_states)
+        key = self.to_k(kv_params)
+        value = self.to_v(kv_params)
 
-        b_size, _, _ = encoder_hidden_states.shape
+        b_size, _, _ = kv_params.shape
 
-        query = query.view(b_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        key = key.view(b_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        value = value.view(b_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        query = query.view(b_size, -1, self.num_heads, self.head_dim)
+        key = key.view(b_size, -1, self.num_heads, self.head_dim)
+        value = value.view(b_size, -1, self.num_heads, self.head_dim)
 
-        attn_output = F.scaled_dot_product_attention(
+        attn_output = flash_attn_func(
             query,
             key,
             value,
             dropout_p=0.0,
-            is_causal=False,
+            causal=False,
         )
-        attn_output = attn_output.transpose(1, 2).reshape(
-            b_size, -1, self.head_dim * self.num_heads
-        )
+
+        attn_output = attn_output.reshape(b_size, -1, self.head_dim * self.num_heads)
         attn_output = attn_output.to(query.dtype)
 
         for layer in self.to_out:
@@ -199,10 +202,7 @@ class BasicTransformerBlock(nn.Module):
         residual = x
 
         x = self.norm2(x)
-        if encoder_hidden_states is not None:
-            x = self.attn2(x, encoder_hidden_states)
-        else:
-            x = self.attn2(x)
+        x = self.attn2(x, encoder_hidden_states)
         x = x + residual
 
         residual = x
